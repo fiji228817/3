@@ -1,0 +1,759 @@
+if getgenv().naomi_loaded then
+    game:GetService("StarterGui"):SetCore("SendNotification", {
+        Title = "Naomi",
+        Text = "Please dont re-execute the script.",
+        Duration = 2,
+    })
+    return
+end
+
+local Players          = game:GetService('Players')
+local RunService       = game:GetService('RunService')
+local UserInputService = game:GetService('UserInputService')
+local RS               = game:GetService('ReplicatedStorage')
+local CurrentCamera    = workspace.CurrentCamera
+local LocalPlayer      = Players.LocalPlayer
+local mouse            = LocalPlayer:GetMouse()
+
+local handler     = require(RS.Modules.GunHandler)
+local oldGetAim   = handler.getAim
+
+local Config = {
+    MouseLockEnabled = false,
+    State            = false,
+    Smoothness       = 0.5,
+    Prediction       = 0.08,
+    LeftOffset       = 2.5,
+    UpOffset         = -20,
+    HitPart          = 'HumanoidRootPart',
+
+    HipHeightEnabled = false,
+    HipHeightValue   = 2,
+
+    Walkspeed = {
+        Enabled = false,
+        Active  = false,
+        Speed   = 100,
+    },
+
+    silent = {
+        enabled    = false,
+        part       = "HumanoidRootPart",
+        fov        = 300,
+        showfov    = false,
+        fovcolor   = Color3.fromRGB(255, 255, 255),
+        prediction = { enabled = false, x = 0.13, y = 0.13, z = 0.13 },
+    },
+
+    checks = {
+        Knocked = false,
+        ["K.O"] = false,
+        Dead    = false,
+        Wall    = false,
+    },
+
+    esp = {
+        enabled       = false,
+        team_check    = false,
+        max_distance  = 1000,
+        box           = { enabled = false, color = Color3.fromRGB(255, 255, 255) },
+        name          = { enabled = false, color = Color3.fromRGB(255, 255, 255) },
+        distance      = { enabled = false, color = Color3.fromRGB(255, 255, 255) },
+        healthbar     = { enabled = false, color = Color3.fromRGB(0, 255, 0) },
+        headdot       = { enabled = false, color = Color3.fromRGB(255, 255, 255) },
+    },
+}
+
+local sa = {
+    target = { player = nil, part = nil },
+    hooked = false,
+}
+
+local script_obj = { functions = {}, connections = {} }
+
+script_obj.functions.setwalkspeed = function(value)
+    local char = LocalPlayer.Character
+    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then hum.WalkSpeed = value end
+end
+
+script_obj.functions.isKO = function(plr)
+    local char = plr.Character
+    local bf   = char and char:FindFirstChild("BodyEffects")
+    return bf and bf:FindFirstChild("K.O") and bf["K.O"].Value
+end
+
+script_obj.functions.isknocked = function(plr)
+    local char = plr.Character
+    local bf   = char and char:FindFirstChild("BodyEffects")
+    return bf and bf:FindFirstChild("Knocked") and bf.Knocked.Value
+end
+
+script_obj.functions.isdead = function(plr)
+    local char = plr.Character
+    local bf   = char and char:FindFirstChild("BodyEffects")
+    return bf and bf:FindFirstChild("Dead") and bf.Dead.Value
+end
+
+script_obj.functions.validate = function(plr)
+    if not plr or not plr.Character then return false end
+    local char = plr.Character
+    local hum  = char:FindFirstChild("Humanoid")
+    if not char:FindFirstChild("Head") or not hum or hum.Health <= 0 then return false end
+    if Config.checks["K.O"]   and script_obj.functions.isKO(plr)      then return false end
+    if Config.checks.Knocked  and script_obj.functions.isknocked(plr) then return false end
+    if Config.checks.Dead     and script_obj.functions.isdead(plr)    then return false end
+    return true
+end
+
+local TARGET_PARTS = {
+    "Head",
+    "UpperTorso", "LowerTorso",
+    "LeftUpperArm", "LeftLowerArm", "LeftHand",
+    "RightUpperArm", "RightLowerArm", "RightHand",
+    "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+    "RightUpperLeg", "RightLowerLeg", "RightFoot",
+}
+
+script_obj.functions.getclosestpart = function(character, screenpos)
+    if not character then return nil, math.huge end
+    local best, bestD = nil, math.huge
+    for _, name in ipairs(TARGET_PARTS) do
+        local part = character:FindFirstChild(name)
+        if part and part:IsA("BasePart") then
+            local vec, onScreen = CurrentCamera:WorldToScreenPoint(part.Position)
+            if onScreen then
+                local d = (Vector2.new(vec.X, vec.Y) - screenpos).Magnitude
+                if d < bestD then
+                    bestD = d
+                    best  = part
+                end
+            end
+        end
+    end
+    return best, bestD
+end
+
+script_obj.functions.getclosestplr = function()
+    if not Config.silent.enabled then return nil, nil end
+
+    local mp         = UserInputService:GetMouseLocation()
+    local bestplayer = nil
+    local bestpart   = nil
+    local bdist      = Config.silent.fov
+
+    for _, v in ipairs(Players:GetPlayers()) do
+        if v ~= LocalPlayer and script_obj.functions.validate(v) then
+            local part, dist
+
+            if Config.silent.part == "Closest Part" then
+                part, dist = script_obj.functions.getclosestpart(v.Character, mp)
+            else
+                local sp = v.Character:FindFirstChild(Config.silent.part)
+                if sp then
+                    local vec, onScreen = CurrentCamera:WorldToScreenPoint(sp.Position)
+                    if onScreen then
+                        part = sp
+                        dist = (Vector2.new(vec.X, vec.Y) - mp).Magnitude
+                    end
+                end
+            end
+
+            if part and dist and dist < bdist then
+                if Config.checks.Wall then
+                    local params = RaycastParams.new()
+                    params.FilterType = Enum.RaycastFilterType.Exclude
+                    params.FilterDescendantsInstances = { LocalPlayer.Character, CurrentCamera }
+                    local hit = workspace:Raycast(
+                        CurrentCamera.CFrame.Position,
+                        (part.Position - CurrentCamera.CFrame.Position).Unit * 500,
+                        params
+                    )
+                    if hit and hit.Instance:IsDescendantOf(v.Character) then
+                        bdist, bestplayer, bestpart = dist, v, part
+                    end
+                else
+                    bdist, bestplayer, bestpart = dist, v, part
+                end
+            end
+        end
+    end
+    return bestplayer, bestpart
+end
+
+local fov_fill = Drawing.new("Circle")
+fov_fill.Thickness   = 1
+fov_fill.NumSides    = 100
+fov_fill.Filled      = false
+fov_fill.Visible     = false
+fov_fill.Transparency = 1
+
+local fov_outline = Drawing.new("Circle")
+fov_outline.Thickness    = 1
+fov_outline.NumSides     = 100
+fov_outline.Filled       = false
+fov_outline.Visible      = false
+fov_outline.Color        = Color3.fromRGB(0, 0, 0)
+fov_outline.Transparency = 1
+
+local function updateFov()
+    local show = Config.silent.showfov
+    fov_fill.Visible    = show
+    fov_outline.Visible = show
+    if not show then return end
+
+    local vp = CurrentCamera.ViewportSize
+    local center = Vector2.new(vp.X * 0.5, vp.Y * 0.5)
+    fov_fill.Position   = center
+    fov_fill.Radius     = Config.silent.fov
+    fov_fill.Color      = Config.silent.fovcolor
+    fov_outline.Position = center
+    fov_outline.Radius   = Config.silent.fov + 1
+end
+
+local esp_pool = {}
+
+local function new_drawing(kind, props)
+    local d = Drawing.new(kind)
+    for k, v in pairs(props) do d[k] = v end
+    return d
+end
+
+local function create_esp(plr)
+    if esp_pool[plr] then return end
+    local o = {}
+
+    o.box_outline = new_drawing("Square", {
+        Thickness = 3, Filled = false, Visible = false,
+        Color = Color3.fromRGB(0, 0, 0), Transparency = 1,
+    })
+    o.box = new_drawing("Square", {
+        Thickness = 1, Filled = false, Visible = false,
+        Color = Color3.fromRGB(255, 255, 255), Transparency = 1,
+    })
+
+    o.name = new_drawing("Text", {
+        Size = 16, Center = true, Outline = true, Visible = false,
+        Font = 41, Color = Color3.fromRGB(255, 255, 255),
+        OutlineColor = Color3.fromRGB(0, 0, 0), Transparency = 1,
+    })
+    o.distance = new_drawing("Text", {
+        Size = 16, Center = true, Outline = true, Visible = false,
+        Font = 41, Color = Color3.fromRGB(255, 255, 255),
+        OutlineColor = Color3.fromRGB(0, 0, 0), Transparency = 1,
+    })
+
+    o.hp_bg = new_drawing("Line", {
+        Thickness = 3, Visible = false,
+        Color = Color3.fromRGB(0, 0, 0), Transparency = 1,
+    })
+    o.hp = new_drawing("Line", {
+        Thickness = 1, Visible = false,
+        Color = Color3.fromRGB(0, 255, 0), Transparency = 1,
+    })
+
+    o.head_outline = new_drawing("Circle", {
+        Thickness = 3, NumSides = 20, Filled = false, Visible = false,
+        Color = Color3.fromRGB(0, 0, 0), Transparency = 1,
+    })
+    o.head = new_drawing("Circle", {
+        Thickness = 1, NumSides = 20, Filled = false, Visible = false,
+        Color = Color3.fromRGB(255, 255, 255), Transparency = 1,
+    })
+
+    esp_pool[plr] = o
+end
+
+local function remove_esp(plr)
+    local o = esp_pool[plr]
+    if not o then return end
+    for _, d in pairs(o) do pcall(function() d:Remove() end) end
+    esp_pool[plr] = nil
+end
+
+local function hide_esp(o)
+    o.box.Visible = false
+    o.box_outline.Visible = false
+    o.name.Visible = false
+    o.distance.Visible = false
+    o.hp.Visible = false
+    o.hp_bg.Visible = false
+    o.head.Visible = false
+    o.head_outline.Visible = false
+end
+
+for _, p in ipairs(Players:GetPlayers()) do
+    if p ~= LocalPlayer then create_esp(p) end
+end
+Players.PlayerAdded:Connect(function(p) if p ~= LocalPlayer then create_esp(p) end end)
+Players.PlayerRemoving:Connect(remove_esp)
+
+local function update_esp()
+    local E = Config.esp
+    local my_hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local my_team = LocalPlayer.Team
+
+    for plr, o in pairs(esp_pool) do
+        local show = false
+        local char = plr.Character
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+        local head = char and char:FindFirstChild("Head")
+
+        if E.enabled and char and hum and hum.Health > 0 and hrp and head
+           and not (E.team_check and my_team and plr.Team and plr.Team == my_team) then
+
+            local dist = my_hrp and (hrp.Position - my_hrp.Position).Magnitude or 0
+            if dist <= E.max_distance then
+                local topV, topOn = CurrentCamera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.6, 0))
+                local botV, botOn = CurrentCamera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3.2, 0))
+                if (topOn or botOn) and topV.Z > 0 and botV.Z > 0 then
+                    show = true
+                    local topY  = topV.Y
+                    local botY  = botV.Y
+                    local height = botY - topY
+                    local width  = height * 0.55
+                    local cx     = (topV.X + botV.X) * 0.5
+                    local x      = cx - width * 0.5
+                    local y      = topY
+
+                    if E.box.enabled then
+                        o.box_outline.Size     = Vector2.new(width, height)
+                        o.box_outline.Position = Vector2.new(x, y)
+                        o.box_outline.Visible  = true
+
+                        o.box.Size     = Vector2.new(width, height)
+                        o.box.Position = Vector2.new(x, y)
+                        o.box.Color    = E.box.color
+                        o.box.Visible  = true
+                    else
+                        o.box.Visible = false
+                        o.box_outline.Visible = false
+                    end
+
+                    if E.name.enabled then
+                        local label = plr.DisplayName ~= "" and plr.DisplayName or plr.Name
+                        o.name.Text     = label
+                        o.name.Position = Vector2.new(cx, y - 16)
+                        o.name.Color    = E.name.color
+                        o.name.Visible  = true
+                    else
+                        o.name.Visible = false
+                    end
+
+                    if E.distance.enabled then
+                        o.distance.Text     = string.format("[%d m]", math.floor(dist))
+                        o.distance.Position = Vector2.new(cx, y + height + 2)
+                        o.distance.Color    = E.distance.color
+                        o.distance.Visible  = true
+                    else
+                        o.distance.Visible = false
+                    end
+
+                    if E.healthbar.enabled then
+                        local hp_ratio = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+                        local bar_x = x - 5
+                        o.hp_bg.From = Vector2.new(bar_x, y - 1)
+                        o.hp_bg.To   = Vector2.new(bar_x, y + height + 1)
+                        o.hp_bg.Visible = true
+
+                        o.hp.From = Vector2.new(bar_x, y + height * (1 - hp_ratio))
+                        o.hp.To   = Vector2.new(bar_x, y + height)
+                        o.hp.Color = E.healthbar.color
+                        o.hp.Visible = true
+                    else
+                        o.hp.Visible = false
+                        o.hp_bg.Visible = false
+                    end
+
+                    if E.headdot.enabled then
+                        local hv, hon = CurrentCamera:WorldToViewportPoint(head.Position)
+                        if hon then
+                            local scale = head.Size.Y
+                            local depth = math.max(1, hv.Z)
+                            local radius = (scale * 50) / depth
+                            o.head_outline.Radius   = radius + 1
+                            o.head_outline.Position = Vector2.new(hv.X, hv.Y)
+                            o.head_outline.Visible  = true
+                            o.head.Radius   = radius
+                            o.head.Position = Vector2.new(hv.X, hv.Y)
+                            o.head.Color    = E.headdot.color
+                            o.head.Visible  = true
+                        else
+                            o.head.Visible = false
+                            o.head_outline.Visible = false
+                        end
+                    else
+                        o.head.Visible = false
+                        o.head_outline.Visible = false
+                    end
+                end
+            end
+        end
+        if not show then hide_esp(o) end
+    end
+end
+
+local repo = 'https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/'
+local Library      = loadstring(game:HttpGet(repo .. 'Library.lua'))()
+local ThemeManager = loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
+local SaveManager  = loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
+
+local Window = Library:CreateWindow({
+    Title        = 'Naomi',
+    Center       = true,
+    AutoShow     = true,
+    TabPadding   = 8,
+    MenuFadeTime = 0.2,
+})
+
+local Tabs = {
+    Combat          = Window:AddTab('Combat'),
+    Visuals         = Window:AddTab('Visuals'),
+    ['UI Settings'] = Window:AddTab('UI Settings'),
+}
+
+local bp = { enabled = false, value = 100 }
+
+local SAbox = Tabs.Combat:AddLeftGroupbox('Silent Aim')
+SAbox:AddToggle('EnableSA', {
+    Text = 'Enable', Default = false,
+    Callback = function(v) Config.silent.enabled = v end,
+})
+SAbox:AddDropdown('HitPart', {
+    Values = { 'Head', 'UpperTorso', 'HumanoidRootPart', 'Closest Part' },
+    Default = 3, Multi = false, Text = 'Hitpart',
+    Callback = function(v) Config.silent.part = v end,
+})
+SAbox:AddToggle('CheckKnocked', {
+    Text = 'Ignore Knocked', Default = false,
+    Callback = function(v) Config.checks.Knocked = v end,
+})
+SAbox:AddToggle('CheckKO', {
+    Text = 'Ignore K.O', Default = false,
+    Callback = function(v) Config.checks["K.O"] = v end,
+})
+SAbox:AddToggle('CheckDead', {
+    Text = 'Ignore Dead', Default = false,
+    Callback = function(v) Config.checks.Dead = v end,
+})
+SAbox:AddToggle('CheckWall', {
+    Text = 'Wallcheck', Default = false,
+    Callback = function(v) Config.checks.Wall = v end,
+})
+
+local PREDBOX = Tabs.Combat:AddLeftGroupbox('Prediction')
+PREDBOX:AddToggle('EnablePRED', {
+    Text = 'Enable', Default = Config.silent.prediction.enabled,
+    Callback = function(v) Config.silent.prediction.enabled = v end,
+})
+PREDBOX:AddSlider('Predx', {
+    Text = 'X', Default = Config.silent.prediction.x,
+    Min = 0, Max = 0.2, Rounding = 2,
+    Callback = function(v) Config.silent.prediction.x = v end,
+})
+PREDBOX:AddSlider('Predy', {
+    Text = 'Y', Default = Config.silent.prediction.y,
+    Min = 0, Max = 0.2, Rounding = 2,
+    Callback = function(v) Config.silent.prediction.y = v end,
+})
+PREDBOX:AddSlider('Predz', {
+    Text = 'Z', Default = Config.silent.prediction.z,
+    Min = 0, Max = 0.2, Rounding = 2,
+    Callback = function(v) Config.silent.prediction.z = v end,
+})
+
+local FOVbox = Tabs.Combat:AddLeftGroupbox('FOV')
+FOVbox:AddToggle('ShowFOV', {
+    Text = 'Show FOV', Default = Config.silent.showfov,
+    Callback = function(v) Config.silent.showfov = v end,
+})
+FOVbox:AddSlider('FovR', {
+    Text = 'Radius', Default = Config.silent.fov,
+    Min = 5, Max = 1000, Rounding = 0,
+    Callback = function(v) Config.silent.fov = v end,
+})
+FOVbox:AddLabel('FOV Color'):AddColorPicker('ColorPicker', {
+    Default = Color3.fromRGB(255, 255, 255),
+    Title = 'Fov Color', Transparency = 0,
+    Callback = function(v) Config.silent.fovcolor = v end,
+})
+
+local SPREADbox = Tabs.Combat:AddLeftGroupbox('Spread Adjuster')
+SPREADbox:AddToggle('EnableSPREAD', {
+    Text = 'Enable', Default = false,
+    Callback = function(v) bp.enabled = v end,
+})
+SPREADbox:AddSlider('SpreadValue', {
+    Text = 'Value', Default = bp.value,
+    Min = 1, Max = 100, Rounding = 2,
+    Callback = function(v) bp.value = v end,
+})
+
+local MLBox = Tabs.Combat:AddRightGroupbox('MouseLock')
+MLBox:AddToggle('EnableML', {
+    Text = 'Enable', Default = false,
+    Callback = function(v)
+        Config.MouseLockEnabled = v
+        if not v then Config.State = false end
+    end,
+})
+MLBox:AddLabel('Keybind'):AddKeyPicker('MLKey', {
+    Default = 'C', SyncToggleState = false, Mode = 'Toggle',
+    NoUI = false, Text = 'MouseLock',
+    Callback = function(active)
+        Config.State = active and Config.MouseLockEnabled
+    end,
+})
+MLBox:AddSlider('Smoothness', {
+    Text = 'Smoothness', Default = Config.Smoothness,
+    Min = 0.1, Max = 1, Rounding = 2,
+    Callback = function(v) Config.Smoothness = v end,
+})
+MLBox:AddSlider('MLPrediction', {
+    Text = 'Prediction', Default = Config.Prediction,
+    Min = 0.01, Max = 0.5, Rounding = 2,
+    Callback = function(v) Config.Prediction = v end,
+})
+MLBox:AddSlider('LROff', {
+    Text = 'Left & Right Offset', Default = Config.LeftOffset,
+    Min = -5, Max = 5, Rounding = 2,
+    Callback = function(v) Config.LeftOffset = v end,
+})
+MLBox:AddSlider('UDOff', {
+    Text = 'Up & Down Offset', Default = Config.UpOffset,
+    Min = -20, Max = 20, Rounding = 1,
+    Callback = function(v) Config.UpOffset = v end,
+})
+
+local HHBox = Tabs.Combat:AddRightGroupbox('HipHeight')
+HHBox:AddToggle('HipHeight', {
+    Text = 'Enable', Default = Config.HipHeightEnabled,
+    Callback = function(v) Config.HipHeightEnabled = v end,
+})
+HHBox:AddSlider('HHV', {
+    Text = 'Value', Default = Config.HipHeightValue,
+    Min = -10, Max = 10, Rounding = 1,
+    Callback = function(v) Config.HipHeightValue = v end,
+})
+
+local WSBox = Tabs.Combat:AddRightGroupbox('WalkSpeed')
+WSBox:AddToggle('WSEnable', {
+    Text = 'Enable', Default = Config.Walkspeed.Enabled,
+    Callback = function(v)
+        Config.Walkspeed.Enabled = v
+        if not v then Config.Walkspeed.Active = false end
+    end,
+})
+WSBox:AddLabel('Keybind'):AddKeyPicker('WSKey', {
+    Default = 'Z', SyncToggleState = false, Mode = 'Toggle',
+    NoUI = false, Text = 'WalkSpeed',
+    Callback = function(active)
+        Config.Walkspeed.Active = active and Config.Walkspeed.Enabled
+    end,
+})
+WSBox:AddSlider('WSV', {
+    Text = 'Value', Default = Config.Walkspeed.Speed,
+    Min = 1, Max = 500, Rounding = 0,
+    Callback = function(v) Config.Walkspeed.Speed = v end,
+})
+
+local ESPBox = Tabs.Visuals:AddLeftGroupbox('Player ESP')
+ESPBox:AddToggle('ESPEnable', {
+    Text = 'Enable', Default = Config.esp.enabled,
+    Callback = function(v) Config.esp.enabled = v end,
+})
+ESPBox:AddSlider('ESPMaxDist', {
+    Text = 'Max distance', Default = Config.esp.max_distance,
+    Min = 50, Max = 3000, Rounding = 0,
+    Callback = function(v) Config.esp.max_distance = v end,
+})
+
+local BOXBox = Tabs.Visuals:AddLeftGroupbox('Box')
+BOXBox:AddToggle('ESPBox', {
+    Text = 'Enable', Default = Config.esp.box.enabled,
+    Callback = function(v) Config.esp.box.enabled = v end,
+}):AddColorPicker('ESPBoxColor', {
+    Default = Config.esp.box.color, Title = 'Box color', Transparency = 0,
+    Callback = function(v) Config.esp.box.color = v end,
+})
+
+local NAMEBox = Tabs.Visuals:AddLeftGroupbox('Name')
+NAMEBox:AddToggle('ESPName', {
+    Text = 'Enable', Default = Config.esp.name.enabled,
+    Callback = function(v) Config.esp.name.enabled = v end,
+}):AddColorPicker('ESPNameColor', {
+    Default = Config.esp.name.color, Title = 'Name color', Transparency = 0,
+    Callback = function(v) Config.esp.name.color = v end,
+})
+
+local DISTBox = Tabs.Visuals:AddLeftGroupbox('Distance')
+DISTBox:AddToggle('ESPDist', {
+    Text = 'Enable', Default = Config.esp.distance.enabled,
+    Callback = function(v) Config.esp.distance.enabled = v end,
+}):AddColorPicker('ESPDistColor', {
+    Default = Config.esp.distance.color, Title = 'Distance color', Transparency = 0,
+    Callback = function(v) Config.esp.distance.color = v end,
+})
+
+local HPBox = Tabs.Visuals:AddRightGroupbox('Healthbar')
+HPBox:AddToggle('ESPHP', {
+    Text = 'Enable', Default = Config.esp.healthbar.enabled,
+    Callback = function(v) Config.esp.healthbar.enabled = v end,
+}):AddColorPicker('ESPHPColor', {
+    Default = Config.esp.healthbar.color, Title = 'Healthbar color', Transparency = 0,
+    Callback = function(v) Config.esp.healthbar.color = v end,
+})
+
+local HEADBox = Tabs.Visuals:AddRightGroupbox('Head dot')
+HEADBox:AddToggle('ESPHead', {
+    Text = 'Enable', Default = Config.esp.headdot.enabled,
+    Callback = function(v) Config.esp.headdot.enabled = v end,
+}):AddColorPicker('ESPHeadColor', {
+    Default = Config.esp.headdot.color, Title = 'Head dot color', Transparency = 0,
+    Callback = function(v) Config.esp.headdot.color = v end,
+})
+
+Library.KeybindFrame.Visible = true
+
+local MenuGroup = Tabs['UI Settings']:AddLeftGroupbox('Menu')
+MenuGroup:AddButton('Unload', function()
+    Library:Unload()
+    getgenv().naomi_loaded = nil
+end)
+MenuGroup:AddLabel('Menu bind'):AddKeyPicker('MenuKeybind', { Default = 'End', NoUI = true, Text = 'Menu keybind' })
+Library.ToggleKeybind = Options.MenuKeybind
+
+MenuGroup:AddToggle('KEBLISTSAW', {
+    Text = 'Show Keybind List', Default = Library.KeybindFrame.Visible,
+    Callback = function(v) Library.KeybindFrame.Visible = v end,
+})
+
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({ 'MenuKeybind' })
+ThemeManager:SetFolder('Naomi')
+SaveManager:SetFolder('Naomi/DaHood')
+SaveManager:BuildConfigSection(Tabs['UI Settings'])
+ThemeManager:ApplyToTab(Tabs['UI Settings'])
+SaveManager:LoadAutoloadConfig()
+
+local target
+RunService.RenderStepped:Connect(function()
+    if Config.MouseLockEnabled and Config.State then
+        if not (target and target.Parent) then
+            local best = nil
+            local bestD = math.huge
+            local mp = UserInputService:GetMouseLocation()
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if plr ~= LocalPlayer and plr.Character then
+                    local hum = plr.Character:FindFirstChildOfClass('Humanoid')
+                    if hum and hum.Health > 0 then
+                        local part = plr.Character:FindFirstChild(Config.HitPart) or plr.Character.PrimaryPart
+                        if part then
+                            local sp = CurrentCamera:WorldToViewportPoint(part.Position)
+                            local d  = (Vector2.new(mp.X, mp.Y) - Vector2.new(sp.X, sp.Y)).Magnitude
+                            if d < bestD then best, bestD = part, d end
+                        end
+                    end
+                end
+            end
+            target = best
+        end
+
+        if target and target.Parent then
+            local vel = typeof(target.AssemblyLinearVelocity) == 'Vector3'
+                and target.AssemblyLinearVelocity or target.Velocity
+            local worldPos  = target.Position + (vel * Config.Prediction)
+            local camRight  = CurrentCamera.CFrame.RightVector
+            local offsetVec = (camRight * Config.LeftOffset) + Vector3.new(0, Config.UpOffset, 0)
+            local finalPos  = worldPos + offsetVec
+            local sp, onScreen = CurrentCamera:WorldToViewportPoint(finalPos)
+            if onScreen then
+                local mp    = UserInputService:GetMouseLocation()
+                local moveX = (sp.X - mp.X) * Config.Smoothness
+                local moveY = (sp.Y - mp.Y) * Config.Smoothness
+                if math.abs(moveX) > 0.01 or math.abs(moveY) > 0.01 then
+                    pcall(function() mousemoverel(moveX, moveY) end)
+                end
+            end
+        end
+    else
+        target = nil
+    end
+
+    if Config.HipHeightEnabled then
+        local char = LocalPlayer.Character
+        local hum  = char and char:FindFirstChildOfClass('Humanoid')
+        if hum then hum.HipHeight = Config.HipHeightValue end
+    end
+
+    if Config.Walkspeed.Enabled and Config.Walkspeed.Active then
+        local char = LocalPlayer.Character
+        local hum  = char and char:FindFirstChildOfClass('Humanoid')
+        if hum then hum.WalkSpeed = Config.Walkspeed.Speed end
+    end
+
+    if Config.silent.enabled then
+        sa.target.player, sa.target.part = script_obj.functions.getclosestplr()
+    else
+        sa.target.player, sa.target.part = nil, nil
+    end
+
+    updateFov()
+    update_esp()
+end)
+
+handler.getAim = function(origin, maxDist)
+    if Config.silent.enabled and sa.target.part then
+        local part = sa.target.part
+        local pos  = part.Position
+        if Config.silent.prediction.enabled then
+            local vel = part.AssemblyLinearVelocity
+            local p   = Config.silent.prediction
+            pos = pos + Vector3.new(vel.X * p.x, vel.Y * p.y, vel.Z * p.z)
+        end
+        local offset   = pos - origin
+        local distance = offset.Magnitude
+        return offset.Unit, math.min(distance, maxDist or 200)
+    end
+    return oldGetAim(origin, maxDist)
+end
+
+local idx
+idx = hookmetamethod(game, "__index", function(self, key)
+    if not checkcaller() and self == mouse and Config.silent.enabled and sa.target.part then
+        if key == "Hit" then
+            local part = sa.target.part
+            local vel  = part.AssemblyLinearVelocity
+            local p    = Config.silent.prediction
+            local pos  = part.Position + Vector3.new(vel.X * p.x, vel.Y * p.y, vel.Z * p.z)
+            return CFrame.new(pos)
+        elseif key == "Target" then
+            return sa.target.part
+        end
+    end
+    return idx(self, key)
+end)
+
+local _0x9ba38e
+_0x9ba38e = hookfunction(math.random, function(...)
+    local args = {...}
+    if checkcaller() then return _0x9ba38e(...) end
+    if (#args == 0) or (args[1] == -0.05 and args[2] == 0.05) or (args[1] == -0.1) or (args[1] == -0.05) then
+        if bp.enabled then return _0x9ba38e(...) * (bp.value / 100) end
+    end
+    return _0x9ba38e(...)
+end)
+
+sa.hooked = true
+getgenv().naomi_loaded = true
+
+Library:OnUnload(function()
+    fov_fill:Remove()
+    fov_outline:Remove()
+    for p, _ in pairs(esp_pool) do remove_esp(p) end
+    handler.getAim = oldGetAim
+    getgenv().naomi_loaded = nil
+end)
